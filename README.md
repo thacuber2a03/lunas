@@ -4,7 +4,7 @@ an Uxntal assembler written in Lua
 features:
 - better error reporting
 - warnings
-- time spent assembling
+- shows time spent assembling
 
 checklist:
 - [x] comments
