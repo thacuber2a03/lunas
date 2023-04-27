@@ -1,12 +1,12 @@
 # lunas
 an Uxntal assembler written in Lua
 
-features:
+### features
 - better error reporting
 - warnings
 - shows time spent assembling
 
-checklist:
+### checklist
 - [x] comments
 - [x] `[`, `]`, `{` and `}` 
 - [x] basic opcode assembling
