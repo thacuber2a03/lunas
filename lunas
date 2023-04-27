@@ -51,10 +51,12 @@ local function unescape(s)
 	return ret
 end
 
----@param hi integer
+---@param hi integer?
 ---@param lo integer?
 ---@return integer
 local function joinBytes(hi, lo)
+	if not (lo or hi) then return 0 end
+	---@cast hi integer
 	if not lo then return hi end
 	return ((hi & 0xff) << 8) | (lo & 0xff)
 end
@@ -140,7 +142,7 @@ function Program:moveMemPos(num, abs)
 end
 
 ---@param l string?
----@param sub boolean?
+---@param sub boolean
 ---@private
 function Program:addLabel(l, sub)
 	if not l then return end
@@ -149,28 +151,27 @@ function Program:addLabel(l, sub)
 		name = l,
 		refersTo = self.memPos,
 		timesUsed = 0,
-		mainLabel = self.lastMainLabel
+		mainLabel = self.lastMainLabel -- may not need this field?
 	}
 
 	local key = l
 	if not sub then
-		label.mainLabel = nil
 		self.lastMainLabel = label
 	else
-		key = self.lastMainLabel.name .. '/' .. l
+		key = self:resolveLabelName(l)
 	end
 
 	self.labels[key] = label
 end
 
----@param l string?
+---@param id string?
 ---@return integer?
 ---@private
-function Program:getLabelAddr(l)
-	if not l then return end
-	local label = self.labels[l]
+function Program:getLabelAddr(id)
+	if not id then return end
+	local label = self.labels[id]
 	if not label then
-		self:error("Label '"..l.."' does not exist.")
+		self:error("Label '"..id.."' does not exist.")
 		return 0
 	end
 	label.timesUsed = label.timesUsed + 1
@@ -181,24 +182,23 @@ function Program:getLabelAddr(l)
 end
 
 ---@param id string?
----@return Label?
+---@return string
 ---@private
 function Program:resolveLabelName(id)
-	if not id then return end
+	if not id then return "placeholder" end
+	if not self.lastMainLabel then return id end
+	return self.lastMainLabel.name .. '/' .. id
+end
 
-	local label = self.labels[id]
-	if label then return label.name end
-
-	for actualName,l in pairs(self.labels) do
-		if l.name == id then
-			if not l.mainLabel then
-				error("wut ("..l.name..")")
-			end
-			return actualName
-		end
-	end
-
-	self:error("Sublabel '"..id.."' does not exist.")
+---@param id string?
+---@return boolean
+---@private
+function Program:labelExists(id)
+	if not id then return false end
+	if self.labels[id] then return true end
+	id = self:resolveLabelName(id)
+	if self.labels[id] then return true end
+	return false
 end
 
 ---@param msg string
@@ -238,6 +238,8 @@ function Program:skipComment()
 	while not self:atEnd() and self.curChar ~= ')' do self:advance() end
 	if self:atEnd() then
 		self:error "Missing closing parenthesis"
+	else
+		self:advance()
 	end
 end
 
@@ -287,17 +289,218 @@ function Program:scanIdentifier()
 	return id
 end
 
----@return integer high, integer? low # high and low byte, only low (in high position) if num <= 0xff
+---@param literal boolean
+---@return integer? high, integer? low # high and low byte, only low (in high position) if num <= 0xff
 ---@private
-function Program:scanNumber()
+function Program:scanNumber(literal)
 	local snum = ""
 	while self.curChar:match "[0-9a-f]" do
 		snum = snum .. self:advance()
 	end
-
 	self:setStart()
 	local num, len = tonumber(snum, 16), #snum
-	if num <= 0xff then
-		return num & 0xff
+	if len == 0 then return end
+
+	if literal then
+		if len <= 2 then
+			return num & 0xff
+		elseif len <= 4 then
+			return (num >> 8) & 0xff, num & 0xff
+		else
+			self:error "Number too big"
+		end
+	else
+		if num < 0x100 then
+			return num & 0xff
+		elseif num >= 0x100 and num < 0x10000 then
+			return (num >> 8) & 0xff, num & 0xff
+		else
+			self:error "Number too big"
+		end
 	end
+end
+
+function Program:assemble()
+	local start = os.clock()
+	-- first pass: figure out the labels and where they are
+	while not self:atEnd() do
+		while not self:atEnd() and self.curChar:match "%s" do
+			self:advance()
+		end
+		if self:atEnd() then break end
+
+		if self.curChar == '(' then
+			self:skipComment()
+
+		elseif self.curChar:match "[{}%[%]]" then
+			self:advance()
+
+		elseif self.curChar == '@' then
+			self:advance()
+			self:setStart()
+			local id = self:scanIdentifier()
+			if not id then self:error "Missing label name" end
+			if self:labelExists(id) then self:error("Overwriting existing label '"..id.."'") end
+			self:addLabel(id, false)
+
+		elseif self.curChar == '&' then
+			self:advance()
+			self:setStart()
+			local id = self:scanIdentifier()
+			if not id then self:error "Missing sublabel name" end
+			if self:labelExists(self:resolveLabelName(id)) then self:error("Overwriting existing label '"..id.."'") end
+			self:addLabel(id, true)
+
+		elseif self.curChar == '|' or self.curChar == '$' then
+			local abs = self.curChar == '|'
+			self:advance()
+			local hi, lo = self:scanNumber(false)
+			if not hi then
+				self:error("Missing number after "..(abs and "absolute" or "relative").." padding rune")
+			end
+			---@cast hi integer
+			---@cast lo integer
+			self:moveMemPos(joinBytes(hi, lo), abs)
+
+		elseif self.curChar == '#' then
+			self:advance()
+			self:setStart()
+			local _, lo = self:scanNumber(true)
+			self:moveMemPos(lo and 3 or 2, false)
+
+		elseif self.curChar:match "[.;-=]" then
+			local raw = self.curChar == '-' or self.curChar == '='
+			local abs = self.curChar == ';' or self.curChar == '='
+			self:advance()
+			self:setStart()
+			self:scanIdentifier()
+
+			if not raw then self:moveMemPos(1, false) end -- lit opcode
+			self:moveMemPos(abs and 2 or 1, false)
+
+		elseif self.curChar:match "[0-9a-f]" then
+			local _, lo = self:scanNumber(true)
+			self:moveMemPos(lo and 2 or 1)
+
+		else
+			local op = self:matchOpcode(self:scanIdentifier())
+			if op then self:moveMemPos(1, false) end
+		end
+	end
+
+	-- second pass: actually compile the program
+	self:rewind()
+	while not self:atEnd() do
+		while not self:atEnd() and self.curChar:match "%s" do
+			self:advance()
+		end
+		if self:atEnd() then break end
+
+		if self.curChar == '(' then
+			self:skipComment()
+
+		elseif self.curChar:match "[{}%[%]]" then
+			self:advance()
+
+		elseif self.curChar == '@' then
+			-- skip label, if there should be an error it has been already thrown long ago
+			self:advance()
+			self:scanIdentifier()
+
+		elseif self.curChar == '&' then
+			-- same
+			self:advance()
+			self:scanIdentifier()
+
+		elseif self.curChar == '|' or self.curChar == '$' then
+			local abs = self.curChar == '$'
+			self:advance()
+			self:moveMemPos(joinBytes(self:scanNumber(false)), abs)
+
+		elseif self.curChar == '#' then
+			self:advance()
+			self:setStart()
+			local hi, lo = self:scanNumber(true)
+			if not hi then self:error "Missing number after literal rune" end
+			self:emitBytes(Opcodes.LIT | (lo and ModeFlags.SHORT or 0), hi, lo)
+
+		elseif self.curChar:match '[.;-=]' then
+			local raw = self.curChar == '-' or self.curChar == '='
+			local abs = self.curChar == ';' or self.curChar == '='
+			self:advance()
+			self:setStart()
+			local id = self:scanIdentifier()
+			if not id then
+				self:error(
+					"Missing identifier after "..
+					(raw and "raw" or "").." "..
+					(abs and "absolute" or "zeropage").." addressing rune"
+				)
+			end
+			local addr = self:getLabelAddr(id)
+
+			if not raw then
+				self:emitBytes(Opcodes.LIT | (abs and ModeFlags.SHORT or 0))
+			end
+			if abs then
+				if addr < 0x100 then self:warn "Emitting zeropage address as absolute" end
+				self:emitBytes(addr >> 8, addr)
+			else
+				if addr >= 0x100 then self:warn "Emitting absolute address as zeropage" end
+				self:emitBytes(addr)
+			end
+
+		elseif self.curChar:match "[0-9a-f]" then
+			-- there is no possible way you can fail with this one
+			self:emitBytes(self:scanNumber(true))
+
+		else
+			local id = self:scanIdentifier()
+			local op = self:matchOpcode(id)
+			if op then
+				self:emitBytes(op)
+			else
+				self:error("Undefined identifier '"..id.."'")
+			end
+		end
+	end
+
+	return math.floor((os.clock() - start) * 1000)
+end
+
+-- epilogue
+
+local program
+do
+	local f, err = io.open(arg[1], "rb")
+	if not f then
+		io.write("Error: Couldn't load file '"..arg[1].."': "..err.."\n")
+		os.exit(-1)
+	end
+	program = Program.new(f:read "a")
+	f:close()
+end
+
+local totalTime = program:assemble()
+
+if not program.hadError then
+	local f, err = io.open(arg[2], "w+b")
+	if not f then
+		io.write("Error: Couldn't load file '"..arg[2].."': "..err.."\n")
+		os.exit(-1)
+	end
+
+	local code = program.code
+	for _,byte in ipairs(code) do f:write(string.char(byte)) end
+	f:close()
+
+	local labelAmt = 0
+	for _,_ in pairs(program.labels) do
+		labelAmt = labelAmt + 1
+	end
+
+	io.write("Assembled '", arg[1], "' in ", totalTime, "ms\n")
+	io.write(#code, " bytes (", #code / 652.80, "%", #code >= 0xffff and "!" or "", "), ")
+	io.write(labelAmt, " label", labelAmt ~= 1 and "s" or "", ", ")
+	io.write("0 macros.\n")
 end
