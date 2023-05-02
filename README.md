@@ -1,10 +1,24 @@
 # lunas
 an Uxntal assembler written in Lua
 
+### how to use
+download or clone this repository, then
+- in Linux or MacOS (possibly), just run the `lunas` file like a program
+  ```sh
+  ./lunas myapp.tal myapp.rom
+  ```
+- in Windows, there's no support for shebangs, so you have to directly run the lua interpreter over said file
+  ```bat
+  lua .\lunas myapp.tal myapp.rom
+  ```
+
+### dependencies
+there are no other dependencies apart from needing a Lua 5.4 interpreter, the file is totally self contained
+
 ### features
-- better error reporting
-- warnings
+- better error reporting and warnings
 - shows time spent assembling
+- easily modifiable and extendable (possibly (I have not tried this))
 
 ### checklist
 - [x] comments
@@ -17,6 +31,7 @@ an Uxntal assembler written in Lua
 - [x] addressing runes
 - [x] ascii rune
 - [x] macros
+- [ ] relative addressing runes
 - [ ] jumping runes
 - [ ] preprocessor runes
 
