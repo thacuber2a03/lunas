@@ -112,6 +112,15 @@ function Program:advance()
 	return oldChar
 end
 
+---@param c char
+---@private
+function Program:consume(c)
+	if self.curChar ~= c then
+		self:error("Expected '"..c.."', got '"..self.curChar.."'")
+	end
+	self:advance()
+end
+
 ---Restarts the assembler without discarding already existing code, labels or errors.
 ---@return Program self
 function Program:rewind()
@@ -201,6 +210,13 @@ function Program:labelExists(id)
 	return false
 end
 
+---@param start integer
+---@param finish integer
+---@private
+function Program:addMacro(id, start, finish)
+	self.macros[id] = { start, finish }
+end
+
 ---@param msg string
 ---@private
 function Program:error(msg)
@@ -221,15 +237,12 @@ end
 ---@param ... number
 ---@private
 function Program:emitBytes(...)
+	if self.memPos < 0x0100 then self:error "Can't write over zeropage" end
 	for _, byte in ipairs{...} do
 		if byte ~= nil then
 			table.insert(self.code, byte & 0xff)
 			self:moveMemPos(1)
 		end
-	end
-
-	if self.memPos < 0x0100 then
-		self:error "Can't write over zeropage"
 	end
 end
 
@@ -322,7 +335,7 @@ end
 
 function Program:assemble()
 	local start = os.clock()
-	-- first pass: figure out the labels and where they are
+	-- first pass: figure out the labels and where they are and evaluate macros
 	while not self:atEnd() do
 		while not self:atEnd() and self.curChar:match "%s" do
 			self:advance()
@@ -335,8 +348,22 @@ function Program:assemble()
 		elseif self.curChar:match "[{}%[%]]" then
 			self:advance()
 
-		elseif self.curChar == '@' then
+		elseif self.curChar == '"' then
 			self:advance()
+			self:scanIdentifier()
+
+		elseif self.curChar == "%" then
+			self:advance()
+			local id = self:scanIdentifier()
+			if not id then self:error "Expected identifier after '%'" end
+			self:consume '{'
+			local startPos = self.pos
+			while self.curChar ~= '}' do self:advance() end
+			self:consume '}'
+			self:addMacro(startPos, self.pos - 1)
+
+		elseif self.curChar == '@' then
+			self:consume '@'
 			self:setStart()
 			local id = self:scanIdentifier()
 			if not id then self:error "Missing label name" end
@@ -402,13 +429,22 @@ function Program:assemble()
 		elseif self.curChar:match "[{}%[%]]" then
 			self:advance()
 
+		elseif self.curChar == '"' then
+			self:advance()
+			-- to not lose time, I'll emit each character as it comes
+			local didMove = false
+			while self.curChar:match "%S" do
+				self:emitBytes(string.byte(self.curChar))
+				self:advance()
+				didMove = true
+			end
+			if not didMove then self:error "Expected any non-whitespace character after raw ASCII rune" end
+
 		elseif self.curChar == '@' then
-			-- skip label, if there should be an error it has been already thrown long ago
 			self:advance()
 			self:scanIdentifier()
 
 		elseif self.curChar == '&' then
-			-- same
 			self:advance()
 			self:scanIdentifier()
 
