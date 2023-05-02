@@ -1,0 +1,5 @@
+%test-macro { #01 ADD #02 }
+
+|0100
+	test-macro
+BRK

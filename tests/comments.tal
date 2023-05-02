@@ -1,0 +1,9 @@
+( single line comment )
+
+(
+	multi
+	line
+	comment
+)
+
+( this file should output nothing )

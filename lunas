@@ -18,6 +18,8 @@ local Opcodes = {
 	JCI = 0x20, JMI = 0x40, JSI = 0x60, LIT = 0x80,
 }
 
+-- 00011000
+
 ---@enum ModeFlag
 local ModeFlags = {
 	SHORT = 1 << 5,
@@ -74,6 +76,8 @@ end
 ---@field public  code          integer[]
 ---@field private memPos        integer
 ---@field public  labels        table[ [string]: Label ]
+---@field public  macros        table[ [string]: table ]
+---@field private macroMode     boolean
 ---@field private lastMainLabel Label?
 ---@field public  hadError      boolean
 local Program = {}
@@ -92,6 +96,9 @@ function Program:restart(source)
 	self.source = source
 	self.code = {}
 	self.labels = {}
+	self.macros = {}
+	self.state = {}
+	self.macroMode = false
 	self:rewind()
 	return self
 end
@@ -124,18 +131,28 @@ end
 ---Restarts the assembler without discarding already existing code, labels or errors.
 ---@return Program self
 function Program:rewind()
-	self.pos = 1
-	self.line, self.char = 1, 1
-	self.startl, self.startc = nil, nil
+	if self.macroMode then
+		self:popState()
+	else
+		self.pos = 1
+		self.line, self.char = 1, 1
+		self.startl, self.startc = nil, nil
+	end
 	self.curChar = charAt(self.source, self.pos)
-	self.memPos = 0
+	self.memPos = 0x0100
 	self.lastMainLabel = nil
 	return self
 end
 
 ---@return boolean
 ---@private
-function Program:atEnd() return self.pos > #self.source end
+function Program:atEnd()
+	local cond = self.pos > #self.source
+	if self.macroMode then
+		cond = cond or self.curChar == '}'
+	end
+	return cond
+end
 
 ---@private
 function Program:setStart()
@@ -211,16 +228,54 @@ function Program:labelExists(id)
 end
 
 ---@param start integer
----@param finish integer
+---@param line integer
+---@param char integer
 ---@private
-function Program:addMacro(id, start, finish)
-	self.macros[id] = { start, finish }
+function Program:addMacro(id, start, line, char, startl, startc)
+	self.macros[id] = {
+		pos = start,
+		line = line, char = char,
+		startl = startl, startc = startc,
+	}
+end
+
+---@private
+function Program:storeState()
+	table.insert(self.state, {
+		pos = self.pos,
+		line = self.line, char = self.char,
+		startl = self.startl, startc = self.startc,
+	})
+end
+
+---@private
+function Program:restoreState()
+	local state = self.state[#self.state]
+	self:move(state.pos, state.line, state.char, state.startl, state.startc)
+end
+
+function Program:popState()
+	local state = table.remove(self.state)
+	self:move(state.pos, state.line, state.char, state.startl, state.startc)
+end
+
+---@param pos integer
+---@param line integer
+---@param char integer
+---@private
+function Program:move(pos, line, char, startl, startc)
+	self.pos = pos
+	self.line = line
+	self.char = char
+	self.startl = startl
+	self.startc = startc
+	self.curChar = charAt(self.source, self.pos)
 end
 
 ---@param msg string
 ---@private
 function Program:error(msg)
-	io.write("Error (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), "\n")
+	io.write("Error (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
 	self.hadError = true
 	self.startl, self.startc = nil, nil
 end
@@ -230,7 +285,7 @@ end
 function Program:warn(msg)
 	-- I'm sure users are more worried about errors than warnings
 	if self.hadError then return end
-	io.write("Warning (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), "\n")
+	io.write("Warning (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
 	self.startl, self.startc = nil, nil
 end
 
@@ -333,19 +388,31 @@ function Program:scanNumber(literal)
 	end
 end
 
+function Program:skipWhitespace()
+	while not self:atEnd() and self.curChar:match "%s" do
+		self:advance()
+	end
+end
+
+---@return number # Time in milliseconds
 function Program:assemble()
 	local start = os.clock()
-	-- first pass: figure out the labels and where they are and evaluate macros
+	-- first pass: figure out the labels and macros and where they are
 	while not self:atEnd() do
-		while not self:atEnd() and self.curChar:match "%s" do
-			self:advance()
-		end
+		self:skipWhitespace()
 		if self:atEnd() then break end
 
 		if self.curChar == '(' then
 			self:skipComment()
 
-		elseif self.curChar:match "[{}%[%]]" then
+		elseif self.curChar:match "[[{]" then
+			self:advance()
+
+		elseif self.curChar:match "[%]%}]" then
+			if self.macroMode and self.curChar == '}' then
+				break
+			end
+			self:error("Stray '"..self.curChar.."'")
 			self:advance()
 
 		elseif self.curChar == '"' then
@@ -356,14 +423,25 @@ function Program:assemble()
 			self:advance()
 			local id = self:scanIdentifier()
 			if not id then self:error "Expected identifier after '%'" end
-			self:consume '{'
+			self:skipWhitespace()
+			self:setStart()
+			if self.curChar ~= '{' then
+				self:error "Missing starting brace"
+			end
+			self:advance()
 			local startPos = self.pos
-			while self.curChar ~= '}' do self:advance() end
-			self:consume '}'
-			self:addMacro(startPos, self.pos - 1)
+			local startLine, startChar = self.line, self.char
+			local startSC, startSL = self.startl, self.startc
+			while not self:atEnd() and self.curChar ~= '}' do self:advance() end
+			if self:atEnd() then
+				self:error "Missing closing brace"
+			else
+				self:advance()
+				self:addMacro(id, startPos, startLine, startChar, startSC, startSL)
+			end
 
 		elseif self.curChar == '@' then
-			self:consume '@'
+			self:advance()
 			self:setStart()
 			local id = self:scanIdentifier()
 			if not id then self:error "Missing label name" end
@@ -418,15 +496,17 @@ function Program:assemble()
 	-- second pass: actually compile the program
 	self:rewind()
 	while not self:atEnd() do
-		while not self:atEnd() and self.curChar:match "%s" do
-			self:advance()
-		end
+		self:skipWhitespace()
 		if self:atEnd() then break end
 
 		if self.curChar == '(' then
 			self:skipComment()
 
-		elseif self.curChar:match "[{}%[%]]" then
+		elseif self.curChar:match "[%}%]]" then
+			if self.macroMode and self.curChar == '}' then
+				self:popState()
+				break
+			end
 			self:advance()
 
 		elseif self.curChar == '"' then
@@ -439,6 +519,16 @@ function Program:assemble()
 				didMove = true
 			end
 			if not didMove then self:error "Expected any non-whitespace character after raw ASCII rune" end
+
+		elseif self.curChar == '%' then
+			-- skip all this
+			self:advance()
+			self:scanIdentifier()
+			self:skipWhitespace()
+			if self.curChar == '{' then
+				while not self:atEnd() and self.curChar ~= '}' do self:advance() end
+				if not self:atEnd() then self:consume '}' end
+			end
 
 		elseif self.curChar == '@' then
 			self:advance()
@@ -495,6 +585,15 @@ function Program:assemble()
 			local op = self:matchOpcode(id)
 			if op then
 				self:emitBytes(op)
+			elseif self.macros[id] then
+				local mac = self.macros[id]
+				self:storeState()
+				self:move(mac.pos, mac.line, mac.char, mac.startl, mac.startc)
+				self:storeState() -- for rewind
+				self.macroMode = true
+				self:assemble()
+				self:popState()
+				self.macroMode = #self.state ~= 0
 			else
 				self:error("Undefined identifier '"..id.."'")
 			end
@@ -522,11 +621,12 @@ local totalTime = program:assemble()
 if not program.hadError then
 	local f, err = io.open(arg[2], "w+b")
 	if not f then
-		io.write("Error: Couldn't load file '"..arg[2].."': "..err.."\n")
+		io.write("Error: Couldn't load file '"..arg[2].."' for output: "..err.."\n")
 		os.exit(-1)
 	end
 
 	local code = program.code
+	if #code == 0 then program:warn "Output rom is empty" end
 	for _,byte in ipairs(code) do f:write(string.char(byte)) end
 	f:close()
 

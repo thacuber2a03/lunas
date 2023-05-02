@@ -1,0 +1,7 @@
+%test-macro3 { #01 }
+%test-macro2 { test-macro3 ADD }
+%test-macro { test-macro2 #02 }
+
+|0100
+	test-macro
+BRK
