@@ -16,6 +16,7 @@ an Uxntal assembler written in Lua
 - [x] raw numbers
 - [x] addressing runes
 - [x] ascii rune
+- [x] macros
 - [ ] jumping runes
-- [ ] macros
 - [ ] preprocessor runes
+
