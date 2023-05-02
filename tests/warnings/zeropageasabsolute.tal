@@ -1,0 +1,6 @@
+|0000
+	@test-label $1
+
+|0100
+	;test-label POP
+BRK

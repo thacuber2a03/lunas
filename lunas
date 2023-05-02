@@ -1,9 +1,33 @@
 #!/usr/bin/env lua
 
+-- MIT License
+--
+-- Copyright (c) 2023 @thacuber2a03
+--
+-- Permission is hereby granted, free of charge, to any person obtaining a copy
+-- of this software and associated documentation files (the "Software"), to deal
+-- in the Software without restriction, including without limitation the rights
+-- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+-- copies of the Software, and to permit persons to whom the Software is
+-- furnished to do so, subject to the following conditions:
+--
+-- The above copyright notice and this permission notice shall be included in all
+-- copies or substantial portions of the Software.
+--
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+-- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+-- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+-- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+-- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+-- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+-- SOFTWARE.
+
 -- prologue
 
-if #arg ~= 2 then
-	io.write "Usage: lunas [file] [out]\n"
+local debugger = require 'debugger'
+
+if #arg < 2 then
+	io.write "Usage: lunas [file] [out] [--no-color]\n"
 	os.exit(-1)
 end
 
@@ -18,7 +42,32 @@ local Opcodes = {
 	JCI = 0x20, JMI = 0x40, JSI = 0x60, LIT = 0x80,
 }
 
--- 00011000
+local ESC = string.char(0x1b)
+
+local function setAttrs(...)
+	local vt = {...}
+	local s = ESC .. '['
+	for i,v in ipairs(vt) do
+		s = s .. v
+		if i ~= #vt then s = s .. ';' end
+	end
+	return s .. 'm'
+end
+
+---@enum TermAttrs
+local TermAttrs = {
+	NONE   = setAttrs(),
+	RED    = setAttrs(31),
+	GREEN  = setAttrs(32),
+	YELLOW = setAttrs(33),
+	WHITE  = setAttrs(37),
+}
+
+if arg[3] == "--no-color" then
+	for k,_ in pairs(TermAttrs) do
+		TermAttrs[k] = ""
+	end
+end
 
 ---@enum ModeFlag
 local ModeFlags = {
@@ -48,6 +97,7 @@ local function unescape(s)
 		if c == '\n' then ret = ret .. '\\n'
 		elseif c == '\t' then ret = ret .. '\\t'
 		elseif c == '\r' then ret = ret .. '\\r'
+		elseif c == ESC  then ret = ret .. '^['
 		else ret = ret .. c end
 	end
 	return ret
@@ -176,7 +226,7 @@ function Program:addLabel(l, sub)
 	local label = {
 		name = l,
 		refersTo = self.memPos,
-		timesUsed = 0,
+		used = true,
 		mainLabel = self.lastMainLabel -- may not need this field?
 	}
 
@@ -184,8 +234,10 @@ function Program:addLabel(l, sub)
 	if not sub then
 		self.lastMainLabel = label
 	else
-		key = self:resolveLabelName(l)
+		key = self:resolveLabelName(l, true)
 	end
+
+	print(key, label.name)
 
 	self.labels[key] = label
 end
@@ -195,6 +247,8 @@ end
 ---@private
 function Program:getLabelAddr(id)
 	if not id then return end
+	id = self:resolveLabelName(id)
+
 	local label = self.labels[id]
 	if not label then
 		self:error("Label '"..id.."' does not exist.")
@@ -208,21 +262,27 @@ function Program:getLabelAddr(id)
 end
 
 ---@param id string?
----@return string
+---@return string?
 ---@private
-function Program:resolveLabelName(id)
-	if not id then return "placeholder" end
-	if not self.lastMainLabel then return id end
+function Program:resolveLabelName(id, doError)
+	if not id then return end
+	if not self.lastMainLabel then
+		if doError then self:error "Dangling sublabel" end
+		return id
+	end
 	return self.lastMainLabel.name .. '/' .. id
 end
 
 ---@param id string?
+---@param sub boolean
 ---@return boolean
 ---@private
-function Program:labelExists(id)
+function Program:labelExists(id, sub)
+	debugger()
 	if not id then return false end
 	if self.labels[id] then return true end
-	id = self:resolveLabelName(id)
+	if not sub then return false end
+	id = self:resolveLabelName(id, true)
 	if self.labels[id] then return true end
 	return false
 end
@@ -275,7 +335,13 @@ end
 ---@param msg string
 ---@private
 function Program:error(msg)
-	io.write("Error (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
+	io.write(
+		TermAttrs.RED, "ERROR(", TermAttrs.WHITE,
+		self.startl or self.line,
+		TermAttrs.RED, ",", TermAttrs.WHITE,
+		self.startc or self.char,
+		TermAttrs.RED, "): ", TermAttrs.WHITE, unescape(msg), ".\n"
+	)
 	self.hadError = true
 	self.startl, self.startc = nil, nil
 end
@@ -285,7 +351,13 @@ end
 function Program:warn(msg)
 	-- I'm sure users are more worried about errors than warnings
 	if self.hadError then return end
-	io.write("Warning (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
+	io.write(
+		TermAttrs.YELLOW, "WARNING(", TermAttrs.WHITE,
+		self.startl or self.line,
+		TermAttrs.YELLOW, ",", TermAttrs.WHITE,
+		self.startc or self.char,
+		TermAttrs.YELLOW, "): ", unescape(msg), ".\n", TermAttrs.WHITE
+	)
 	self.startl, self.startc = nil, nil
 end
 
@@ -445,15 +517,16 @@ function Program:assemble()
 			self:setStart()
 			local id = self:scanIdentifier()
 			if not id then self:error "Missing label name" end
-			if self:labelExists(id) then self:error("Overwriting existing label '"..id.."'") end
+			if self:labelExists(id, false) then self:error("Overwriting existing label '"..id.."'") end
 			self:addLabel(id, false)
 
 		elseif self.curChar == '&' then
+			--debugger()
 			self:advance()
 			self:setStart()
 			local id = self:scanIdentifier()
 			if not id then self:error "Missing sublabel name" end
-			if self:labelExists(self:resolveLabelName(id)) then self:error("Overwriting existing label '"..id.."'") end
+			if self:labelExists(id, false) then self:error("Overwriting existing label '"..id.."'") end
 			self:addLabel(id, true)
 
 		elseif self.curChar == '|' or self.curChar == '$' then
@@ -477,11 +550,16 @@ function Program:assemble()
 			local raw = self.curChar == '-' or self.curChar == '='
 			local abs = self.curChar == ';' or self.curChar == '='
 			self:advance()
-			self:setStart()
 			self:scanIdentifier()
 
 			if not raw then self:moveMemPos(1, false) end -- lit opcode
 			self:moveMemPos(abs and 2 or 1, false)
+
+		elseif self.curChar:match "[_,]" then
+			local raw = self.curChar == '_'
+			self:advance()
+			self:scanIdentifier()
+			self:moveMemPos(raw and 1 or 2, false)
 
 		elseif self.curChar:match "[0-9a-f]" then
 			local _, lo = self:scanNumber(true)
@@ -576,6 +654,20 @@ function Program:assemble()
 				self:emitBytes(addr)
 			end
 
+		elseif self.curChar:match "[_,]" then
+			-- relative addressing runes need special care,
+			-- even more with how macros work here
+			local raw = self.curChar == '_'
+			self:advance()
+			local id = self:scanIdentifier()
+			if not id then
+				self:error(
+					"Missing identifier after "..
+					(raw and "raw" or "literal").." relative addressing rune"
+				)
+			end
+			local addr = self:getLabelAddr(id)
+
 		elseif self.curChar:match "[0-9a-f]" then
 			-- there is no possible way you can fail with this one
 			self:emitBytes(self:scanNumber(true))
@@ -635,8 +727,10 @@ if not program.hadError then
 		labelAmt = labelAmt + 1
 	end
 
-	io.write("Assembled '", arg[1], "' in ", totalTime, "ms\n")
+	io.write(TermAttrs.GREEN, "Assembled '", arg[1], "' in ", totalTime, "ms.\n")
 	io.write(#code, " bytes (", #code / 652.80, "%", #code >= 0xffff and "!" or "", "), ")
 	io.write(labelAmt, " label", labelAmt ~= 1 and "s" or "", ", ")
-	io.write("0 macros.\n")
+	io.write("0 macros.\n", TermAttrs.NONE)
+else
+	io.write(TermAttrs.RED, "Couldn't assemble rom.", TermAttrs.NONE)
 end
