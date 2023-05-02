@@ -7,7 +7,7 @@ download or clone this repository, then
   ```sh
   ./lunas myapp.tal myapp.rom
   ```
-- in Windows, there's no support for shebangs, so you have to directly run the lua interpreter over said file
+- in Windows, there's no support for shebangs, so you have to directly run the Lua interpreter over said file
   ```bat
   lua .\lunas myapp.tal myapp.rom
   ```
