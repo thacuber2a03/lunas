@@ -1,33 +1,9 @@
 #!/usr/bin/env lua
 
--- MIT License
---
--- Copyright (c) 2023 @thacuber2a03
---
--- Permission is hereby granted, free of charge, to any person obtaining a copy
--- of this software and associated documentation files (the "Software"), to deal
--- in the Software without restriction, including without limitation the rights
--- to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
--- copies of the Software, and to permit persons to whom the Software is
--- furnished to do so, subject to the following conditions:
---
--- The above copyright notice and this permission notice shall be included in all
--- copies or substantial portions of the Software.
---
--- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
--- IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
--- FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
--- AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
--- LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
--- OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
--- SOFTWARE.
-
 -- prologue
 
-local debugger = require 'debugger'
-
-if #arg < 2 then
-	io.write "Usage: lunas [file] [out] [--no-color]\n"
+if #arg ~= 2 then
+	io.write "Usage: lunas [file] [out]\n"
 	os.exit(-1)
 end
 
@@ -41,33 +17,6 @@ local Opcodes = {
 	ADD = 0x18, SUB = 0x19, MUL = 0x1a, DIV = 0x1b, AND = 0x1c, ORA = 0x1d, EOR = 0x1e, SFT = 0x1f,
 	JCI = 0x20, JMI = 0x40, JSI = 0x60, LIT = 0x80,
 }
-
-local ESC = string.char(0x1b)
-
-local function setAttrs(...)
-	local vt = {...}
-	local s = ESC .. '['
-	for i,v in ipairs(vt) do
-		s = s .. v
-		if i ~= #vt then s = s .. ';' end
-	end
-	return s .. 'm'
-end
-
----@enum TermAttrs
-local TermAttrs = {
-	NONE   = setAttrs(),
-	RED    = setAttrs(31),
-	GREEN  = setAttrs(32),
-	YELLOW = setAttrs(33),
-	WHITE  = setAttrs(37),
-}
-
-if arg[3] == "--no-color" then
-	for k,_ in pairs(TermAttrs) do
-		TermAttrs[k] = ""
-	end
-end
 
 ---@enum ModeFlag
 local ModeFlags = {
@@ -97,7 +46,6 @@ local function unescape(s)
 		if c == '\n' then ret = ret .. '\\n'
 		elseif c == '\t' then ret = ret .. '\\t'
 		elseif c == '\r' then ret = ret .. '\\r'
-		elseif c == ESC  then ret = ret .. '^['
 		else ret = ret .. c end
 	end
 	return ret
@@ -187,9 +135,7 @@ function Program:rewind()
 		self.pos = 1
 		self.line, self.char = 1, 1
 		self.startl, self.startc = nil, nil
-	end
-	self.curChar = charAt(self.source, self.pos)
-	self.memPos = 0x0100
+	end self.curChar = charAt(self.source, self.pos) self.memPos = 0x0100
 	self.lastMainLabel = nil
 	return self
 end
@@ -226,7 +172,7 @@ function Program:addLabel(l, sub)
 	local label = {
 		name = l,
 		refersTo = self.memPos,
-		used = true,
+		timesUsed = 0,
 		mainLabel = self.lastMainLabel -- may not need this field?
 	}
 
@@ -234,10 +180,8 @@ function Program:addLabel(l, sub)
 	if not sub then
 		self.lastMainLabel = label
 	else
-		key = self:resolveLabelName(l, true)
+		key = self:resolveLabelName(l)
 	end
-
-	print(key, label.name)
 
 	self.labels[key] = label
 end
@@ -247,8 +191,6 @@ end
 ---@private
 function Program:getLabelAddr(id)
 	if not id then return end
-	id = self:resolveLabelName(id)
-
 	local label = self.labels[id]
 	if not label then
 		self:error("Label '"..id.."' does not exist.")
@@ -262,27 +204,21 @@ function Program:getLabelAddr(id)
 end
 
 ---@param id string?
----@return string?
+---@return string
 ---@private
-function Program:resolveLabelName(id, doError)
-	if not id then return end
-	if not self.lastMainLabel then
-		if doError then self:error "Dangling sublabel" end
-		return id
-	end
+function Program:resolveLabelName(id)
+	if not id then return "placeholder" end
+	if not self.lastMainLabel then return id end
 	return self.lastMainLabel.name .. '/' .. id
 end
 
 ---@param id string?
----@param sub boolean
 ---@return boolean
 ---@private
-function Program:labelExists(id, sub)
-	debugger()
+function Program:labelExists(id)
 	if not id then return false end
 	if self.labels[id] then return true end
-	if not sub then return false end
-	id = self:resolveLabelName(id, true)
+	id = self:resolveLabelName(id)
 	if self.labels[id] then return true end
 	return false
 end
@@ -335,29 +271,17 @@ end
 ---@param msg string
 ---@private
 function Program:error(msg)
-	io.write(
-		TermAttrs.RED, "ERROR(", TermAttrs.WHITE,
-		self.startl or self.line,
-		TermAttrs.RED, ",", TermAttrs.WHITE,
-		self.startc or self.char,
-		TermAttrs.RED, "): ", TermAttrs.WHITE, unescape(msg), ".\n"
-	)
+	io.write("Error (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
 	self.hadError = true
 	self.startl, self.startc = nil, nil
 end
 
 ---@param msg string
----@private
+---@package
 function Program:warn(msg)
 	-- I'm sure users are more worried about errors than warnings
 	if self.hadError then return end
-	io.write(
-		TermAttrs.YELLOW, "WARNING(", TermAttrs.WHITE,
-		self.startl or self.line,
-		TermAttrs.YELLOW, ",", TermAttrs.WHITE,
-		self.startc or self.char,
-		TermAttrs.YELLOW, "): ", unescape(msg), ".\n", TermAttrs.WHITE
-	)
+	io.write("Warning (", self.startl or self.line, ",", self.startc or self.char, "): ", unescape(msg), ".\n")
 	self.startl, self.startc = nil, nil
 end
 
@@ -429,35 +353,17 @@ function Program:scanIdentifier()
 	return id
 end
 
----@param literal boolean
 ---@return integer? high, integer? low # high and low byte, only low (in high position) if num <= 0xff
 ---@private
-function Program:scanNumber(literal)
+function Program:scanNumber()
 	local snum = ""
+	self:setStart()
 	while self.curChar:match "[0-9a-f]" do
 		snum = snum .. self:advance()
 	end
-	self:setStart()
 	local num, len = tonumber(snum, 16), #snum
-	if len == 0 then return end
-
-	if literal then
-		if len <= 2 then
-			return num & 0xff
-		elseif len <= 4 then
-			return (num >> 8) & 0xff, num & 0xff
-		else
-			self:error "Number too big"
-		end
-	else
-		if num < 0x100 then
-			return num & 0xff
-		elseif num >= 0x100 and num < 0x10000 then
-			return (num >> 8) & 0xff, num & 0xff
-		else
-			self:error "Number too big"
-		end
-	end
+	if len == 0 then error "fatal error at scanNumber" end
+	return num & 0xff, (len > 2 and (num >> 8) & 0xff or nil)
 end
 
 function Program:skipWhitespace()
@@ -469,226 +375,18 @@ end
 ---@return number # Time in milliseconds
 function Program:assemble()
 	local start = os.clock()
-	-- first pass: figure out the labels and macros and where they are
+
 	while not self:atEnd() do
 		self:skipWhitespace()
-		if self:atEnd() then break end
-
-		if self.curChar == '(' then
-			self:skipComment()
-
-		elseif self.curChar:match "[[{]" then
+		local c = self.curChar
+		if c:match "[0-9a-f]" then
+			self:emitBytes(self:scanNumber())
+		elseif c == "#" then
 			self:advance()
-
-		elseif self.curChar:match "[%]%}]" then
-			if self.macroMode and self.curChar == '}' then
-				break
-			end
-			self:error("Stray '"..self.curChar.."'")
-			self:advance()
-
-		elseif self.curChar == '"' then
-			self:advance()
-			self:scanIdentifier()
-
-		elseif self.curChar == "%" then
-			self:advance()
-			local id = self:scanIdentifier()
-			if not id then self:error "Expected identifier after '%'" end
-			self:skipWhitespace()
-			self:setStart()
-			if self.curChar ~= '{' then
-				self:error "Missing starting brace"
-			end
-			self:advance()
-			local startPos = self.pos
-			local startLine, startChar = self.line, self.char
-			local startSC, startSL = self.startl, self.startc
-			while not self:atEnd() and self.curChar ~= '}' do self:advance() end
-			if self:atEnd() then
-				self:error "Missing closing brace"
-			else
-				self:advance()
-				self:addMacro(id, startPos, startLine, startChar, startSC, startSL)
-			end
-
-		elseif self.curChar == '@' then
-			self:advance()
-			self:setStart()
-			local id = self:scanIdentifier()
-			if not id then self:error "Missing label name" end
-			if self:labelExists(id, false) then self:error("Overwriting existing label '"..id.."'") end
-			self:addLabel(id, false)
-
-		elseif self.curChar == '&' then
-			--debugger()
-			self:advance()
-			self:setStart()
-			local id = self:scanIdentifier()
-			if not id then self:error "Missing sublabel name" end
-			if self:labelExists(id, false) then self:error("Overwriting existing label '"..id.."'") end
-			self:addLabel(id, true)
-
-		elseif self.curChar == '|' or self.curChar == '$' then
-			local abs = self.curChar == '|'
-			self:advance()
-			local hi, lo = self:scanNumber(false)
-			if not hi then
-				self:error("Missing number after "..(abs and "absolute" or "relative").." padding rune")
-			end
-			---@cast hi integer
-			---@cast lo integer
-			self:moveMemPos(joinBytes(hi, lo), abs)
-
-		elseif self.curChar == '#' then
-			self:advance()
-			self:setStart()
-			local _, lo = self:scanNumber(true)
-			self:moveMemPos(lo and 3 or 2, false)
-
-		elseif self.curChar:match "[.;-=]" then
-			local raw = self.curChar == '-' or self.curChar == '='
-			local abs = self.curChar == ';' or self.curChar == '='
-			self:advance()
-			self:scanIdentifier()
-
-			if not raw then self:moveMemPos(1, false) end -- lit opcode
-			self:moveMemPos(abs and 2 or 1, false)
-
-		elseif self.curChar:match "[_,]" then
-			local raw = self.curChar == '_'
-			self:advance()
-			self:scanIdentifier()
-			self:moveMemPos(raw and 1 or 2, false)
-
-		elseif self.curChar:match "[0-9a-f]" then
-			local _, lo = self:scanNumber(true)
-			self:moveMemPos(lo and 2 or 1)
-
-		else
-			local op = self:matchOpcode(self:scanIdentifier())
-			if op then self:moveMemPos(1, false) end
-		end
-	end
-
-	-- second pass: actually compile the program
-	self:rewind()
-	while not self:atEnd() do
-		self:skipWhitespace()
-		if self:atEnd() then break end
-
-		if self.curChar == '(' then
-			self:skipComment()
-
-		elseif self.curChar:match "[%}%]]" then
-			if self.macroMode and self.curChar == '}' then
-				self:popState()
-				break
-			end
-			self:advance()
-
-		elseif self.curChar == '"' then
-			self:advance()
-			-- to not lose time, I'll emit each character as it comes
-			local didMove = false
-			while self.curChar:match "%S" do
-				self:emitBytes(string.byte(self.curChar))
-				self:advance()
-				didMove = true
-			end
-			if not didMove then self:error "Expected any non-whitespace character after raw ASCII rune" end
-
-		elseif self.curChar == '%' then
-			-- skip all this
-			self:advance()
-			self:scanIdentifier()
-			self:skipWhitespace()
-			if self.curChar == '{' then
-				while not self:atEnd() and self.curChar ~= '}' do self:advance() end
-				if not self:atEnd() then self:consume '}' end
-			end
-
-		elseif self.curChar == '@' then
-			self:advance()
-			self:scanIdentifier()
-
-		elseif self.curChar == '&' then
-			self:advance()
-			self:scanIdentifier()
-
-		elseif self.curChar == '|' or self.curChar == '$' then
-			local abs = self.curChar == '$'
-			self:advance()
-			self:moveMemPos(joinBytes(self:scanNumber(false)), abs)
-
-		elseif self.curChar == '#' then
-			self:advance()
-			self:setStart()
-			local hi, lo = self:scanNumber(true)
-			if not hi then self:error "Missing number after literal rune" end
-			self:emitBytes(Opcodes.LIT | (lo and ModeFlags.SHORT or 0), hi, lo)
-
-		elseif self.curChar:match '[.;-=]' then
-			local raw = self.curChar == '-' or self.curChar == '='
-			local abs = self.curChar == ';' or self.curChar == '='
-			self:advance()
-			self:setStart()
-			local id = self:scanIdentifier()
-			if not id then
-				self:error(
-					"Missing identifier after "..
-					(raw and "raw" or "").." "..
-					(abs and "absolute" or "zeropage").." addressing rune"
-				)
-			end
-			local addr = self:getLabelAddr(id)
-
-			if not raw then
-				self:emitBytes(Opcodes.LIT | (abs and ModeFlags.SHORT or 0))
-			end
-			if abs then
-				if addr < 0x100 then self:warn "Emitting zeropage address as absolute" end
-				self:emitBytes(addr >> 8, addr)
-			else
-				if addr >= 0x100 then self:warn "Emitting absolute address as zeropage" end
-				self:emitBytes(addr)
-			end
-
-		elseif self.curChar:match "[_,]" then
-			-- relative addressing runes need special care,
-			-- even more with how macros work here
-			local raw = self.curChar == '_'
-			self:advance()
-			local id = self:scanIdentifier()
-			if not id then
-				self:error(
-					"Missing identifier after "..
-					(raw and "raw" or "literal").." relative addressing rune"
-				)
-			end
-			local addr = self:getLabelAddr(id)
-
-		elseif self.curChar:match "[0-9a-f]" then
-			-- there is no possible way you can fail with this one
-			self:emitBytes(self:scanNumber(true))
-
-		else
-			local id = self:scanIdentifier()
-			local op = self:matchOpcode(id)
-			if op then
-				self:emitBytes(op)
-			elseif self.macros[id] then
-				local mac = self.macros[id]
-				self:storeState()
-				self:move(mac.pos, mac.line, mac.char, mac.startl, mac.startc)
-				self:storeState() -- for rewind
-				self.macroMode = true
-				self:assemble()
-				self:popState()
-				self.macroMode = #self.state ~= 0
-			else
-				self:error("Undefined identifier '"..id.."'")
-			end
+			local l, h = self:scanNumber()
+			self:emitBytes(Opcodes.LIT | (h and ModeFlags.SHORT or 0))
+			if h then self:emitBytes(h) end
+			self:emitBytes(l)
 		end
 	end
 
@@ -723,14 +421,10 @@ if not program.hadError then
 	f:close()
 
 	local labelAmt = 0
-	for _,_ in pairs(program.labels) do
-		labelAmt = labelAmt + 1
-	end
+	for _,_ in pairs(program.labels) do labelAmt = labelAmt + 1 end
 
-	io.write(TermAttrs.GREEN, "Assembled '", arg[1], "' in ", totalTime, "ms.\n")
+	io.write("Assembled '", arg[1], "' in ", totalTime, "ms\n")
 	io.write(#code, " bytes (", #code / 652.80, "%", #code >= 0xffff and "!" or "", "), ")
 	io.write(labelAmt, " label", labelAmt ~= 1 and "s" or "", ", ")
-	io.write("0 macros.\n", TermAttrs.NONE)
-else
-	io.write(TermAttrs.RED, "Couldn't assemble rom.", TermAttrs.NONE)
+	io.write("0 macros.\n")
 end
