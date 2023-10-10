@@ -17,7 +17,6 @@ there are no other dependencies apart from needing a Lua 5.4 interpreter, the fi
 
 ### features
 - better error reporting and warnings
-- shows time spent assembling
 - easily modifiable and extendable (possibly (I have not tried this))
 
 ### checklist
